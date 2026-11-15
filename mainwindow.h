@@ -9,10 +9,13 @@ class MainWindow;
 }
 QT_END_NAMESPACE
 
+class QAudioOutput;
+class QLabel;
 class QLineEdit;
+class QMediaPlayer;
+class QPushButton;
 class QSlider;
 class QTableWidget;
-class QPushButton;
 
 class MainWindow : public QMainWindow
 {
@@ -29,12 +32,28 @@ private:
     void filterPlaylist(const QString &text);
     void setCurrentSection(const QString &section);
 
+    void playSelectedTrack();
+    void playTrack(int row);
+    void playNextTrack();
+    void playPreviousTrack();
+    void stopPlayback();
+    void updatePosition(qint64 position);
+    void updateDuration(qint64 duration);
+    QString formatTime(qint64 milliseconds) const;
+
     Ui::MainWindow *ui;
+    QMediaPlayer *player = nullptr;
+    QAudioOutput *audioOutput = nullptr;
     QTableWidget *playlistTable = nullptr;
     QLineEdit *searchEdit = nullptr;
     QSlider *volumeSlider = nullptr;
+    QSlider *seekSlider = nullptr;
+    QLabel *positionLabel = nullptr;
+    QLabel *durationLabel = nullptr;
     QPushButton *playButton = nullptr;
     bool darkTheme = false;
+    bool seeking = false;
+    int currentTrackRow = -1;
 };
 
 #endif // MAINWINDOW_H
