@@ -2,6 +2,7 @@
 #include "./ui_mainwindow.h"
 
 #include <QAction>
+#include <QAudioOutput>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHeaderView>
@@ -9,6 +10,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMediaPlayer>
 #include <QMenuBar>
 #include <QPushButton>
 #include <QSettings>
@@ -17,6 +19,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
+#include <QUrl>
 #include <QWidget>
 
 MainWindow::MainWindow(QWidget *parent)
@@ -24,6 +27,23 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+
+    player = new QMediaPlayer(this);
+    audioOutput = new QAudioOutput(this);
+    player->setAudioOutput(audioOutput);
+    connect(player, &QMediaPlayer::positionChanged, this, &MainWindow::updatePosition);
+    connect(player, &QMediaPlayer::durationChanged, this, &MainWindow::updateDuration);
+    connect(player, &QMediaPlayer::playbackStateChanged, this, [this](QMediaPlayer::PlaybackState state) {
+        if (playButton)
+            playButton->setText(state == QMediaPlayer::PlayingState ? "Pause" : "Play");
+    });
+    connect(player, &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus status) {
+        if (status == QMediaPlayer::EndOfMedia)
+            playNextTrack();
+        else if (status == QMediaPlayer::InvalidMedia)
+            statusBar()->showMessage("Unable to play this audio file", 4000);
+    });
+
     buildInterface();
 
     QSettings settings;
@@ -51,15 +71,12 @@ void MainWindow::buildInterface()
 
     QMenu *playbackMenu = menuBar()->addMenu("&Playback");
     playbackMenu->addAction("Play / Pause", this, [this]() {
-        if (playButton)
-            playButton->click();
+        if (player->playbackState() == QMediaPlayer::PlayingState)
+            player->pause();
+        else
+            playSelectedTrack();
     });
-    playbackMenu->addAction("Stop", this, [this]() {
-        if (playButton) {
-            playButton->setText("Play");
-            statusBar()->showMessage("Playback engine will be added next", 3000);
-        }
-    });
+    playbackMenu->addAction("Stop", this, [this]() { stopPlayback(); });
 
     QMenu *viewMenu = menuBar()->addMenu("&View");
     QAction *lightAction = viewMenu->addAction("Light theme");
@@ -190,6 +207,9 @@ void MainWindow::buildInterface()
     playlistTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
     playlistTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     playlistLayout->addWidget(playlistTable);
+    connect(playlistTable, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
+        playTrack(row);
+    });
 
     workspaceLayout->addWidget(sidebar);
     workspaceLayout->addWidget(playlistPanel, 1);
@@ -205,50 +225,53 @@ void MainWindow::buildInterface()
     auto *previousButton = new QPushButton("|<", playerBar);
     previousButton->setObjectName("transportButton");
     previousButton->setToolTip("Previous track");
-    connect(previousButton, &QPushButton::clicked, this, [this]() {
-        statusBar()->showMessage("Playback engine will be added next", 2500);
-    });
+    connect(previousButton, &QPushButton::clicked, this, &MainWindow::playPreviousTrack);
     playerLayout->addWidget(previousButton);
 
     playButton = new QPushButton("Play", playerBar);
     playButton->setObjectName("playButton");
     playButton->setMinimumWidth(64);
     connect(playButton, &QPushButton::clicked, this, [this]() {
-        const bool playing = playButton->text() == "Play";
-        playButton->setText(playing ? "Pause" : "Play");
-        statusBar()->showMessage("Playback engine will be added next", 2500);
+        if (player->playbackState() == QMediaPlayer::PlayingState) {
+            player->pause();
+        } else if (player->playbackState() == QMediaPlayer::PausedState) {
+            player->play();
+        } else {
+            playSelectedTrack();
+        }
     });
     playerLayout->addWidget(playButton);
 
     auto *nextButton = new QPushButton(">|", playerBar);
     nextButton->setObjectName("transportButton");
     nextButton->setToolTip("Next track");
-    connect(nextButton, &QPushButton::clicked, this, [this]() {
-        statusBar()->showMessage("Playback engine will be added next", 2500);
-    });
+    connect(nextButton, &QPushButton::clicked, this, &MainWindow::playNextTrack);
     playerLayout->addWidget(nextButton);
 
     auto *stopButton = new QPushButton("Stop", playerBar);
     stopButton->setObjectName("transportButton");
-    connect(stopButton, &QPushButton::clicked, this, [this]() {
-        playButton->setText("Play");
-        statusBar()->showMessage("Stopped", 2000);
-    });
+    connect(stopButton, &QPushButton::clicked, this, &MainWindow::stopPlayback);
     playerLayout->addWidget(stopButton);
 
-    auto *timeLabel = new QLabel("00:00", playerBar);
-    timeLabel->setObjectName("mutedLabel");
-    playerLayout->addWidget(timeLabel);
+    positionLabel = new QLabel("00:00", playerBar);
+    positionLabel->setObjectName("mutedLabel");
+    positionLabel->setMinimumWidth(42);
+    playerLayout->addWidget(positionLabel);
 
-    auto *seekSlider = new QSlider(Qt::Horizontal, playerBar);
+    seekSlider = new QSlider(Qt::Horizontal, playerBar);
     seekSlider->setObjectName("seekSlider");
-    seekSlider->setRange(0, 1000);
-    seekSlider->setValue(0);
+    seekSlider->setRange(0, 0);
     seekSlider->setEnabled(false);
+    connect(seekSlider, &QSlider::sliderPressed, this, [this]() { seeking = true; });
+    connect(seekSlider, &QSlider::sliderReleased, this, [this]() {
+        seeking = false;
+        player->setPosition(seekSlider->value());
+    });
     playerLayout->addWidget(seekSlider, 1);
 
-    auto *durationLabel = new QLabel("--:--", playerBar);
+    durationLabel = new QLabel("--:--", playerBar);
     durationLabel->setObjectName("mutedLabel");
+    durationLabel->setMinimumWidth(42);
     playerLayout->addWidget(durationLabel);
     playerLayout->addSpacing(12);
 
@@ -260,6 +283,10 @@ void MainWindow::buildInterface()
     volumeSlider->setRange(0, 100);
     volumeSlider->setValue(70);
     volumeSlider->setFixedWidth(95);
+    audioOutput->setVolume(0.70);
+    connect(volumeSlider, &QSlider::valueChanged, this, [this](int value) {
+        audioOutput->setVolume(value / 100.0);
+    });
     playerLayout->addWidget(volumeSlider);
 
     rootLayout->addWidget(playerBar);
@@ -371,4 +398,129 @@ void MainWindow::filterPlaylist(const QString &text)
 void MainWindow::setCurrentSection(const QString &section)
 {
     statusBar()->showMessage(section + " selected", 2500);
+}
+
+void MainWindow::playSelectedTrack()
+{
+    if (player->playbackState() == QMediaPlayer::PausedState) {
+        player->play();
+        return;
+    }
+
+    int row = playlistTable->currentRow();
+    if (row < 0 || playlistTable->isRowHidden(row)) {
+        row = -1;
+        for (int i = 0; i < playlistTable->rowCount(); ++i) {
+            if (!playlistTable->isRowHidden(i)) {
+                row = i;
+                break;
+            }
+        }
+    }
+
+    if (row >= 0)
+        playTrack(row);
+    else
+        statusBar()->showMessage("Add a music file to the playlist first", 3000);
+}
+
+void MainWindow::playTrack(int row)
+{
+    if (row < 0 || row >= playlistTable->rowCount())
+        return;
+
+    QTableWidgetItem *titleItem = playlistTable->item(row, 1);
+    if (!titleItem)
+        return;
+
+    const QString filePath = titleItem->data(Qt::UserRole).toString();
+    if (filePath.isEmpty())
+        return;
+
+    currentTrackRow = row;
+    playlistTable->selectRow(row);
+    player->setSource(QUrl::fromLocalFile(filePath));
+    player->play();
+    statusBar()->showMessage("Playing: " + titleItem->text(), 3000);
+}
+
+void MainWindow::playNextTrack()
+{
+    if (playlistTable->rowCount() == 0)
+        return;
+
+    int row = currentTrackRow + 1;
+    while (row < playlistTable->rowCount() && playlistTable->isRowHidden(row))
+        ++row;
+
+    if (row >= playlistTable->rowCount()) {
+        row = 0;
+        while (row < playlistTable->rowCount() && playlistTable->isRowHidden(row))
+            ++row;
+    }
+
+    if (row < playlistTable->rowCount())
+        playTrack(row);
+}
+
+void MainWindow::playPreviousTrack()
+{
+    if (playlistTable->rowCount() == 0)
+        return;
+
+    if (player->position() > 3000) {
+        player->setPosition(0);
+        return;
+    }
+
+    int row = currentTrackRow - 1;
+    while (row >= 0 && playlistTable->isRowHidden(row))
+        --row;
+
+    if (row < 0) {
+        row = playlistTable->rowCount() - 1;
+        while (row >= 0 && playlistTable->isRowHidden(row))
+            --row;
+    }
+
+    if (row >= 0)
+        playTrack(row);
+}
+
+void MainWindow::stopPlayback()
+{
+    player->stop();
+    if (playButton)
+        playButton->setText("Play");
+    statusBar()->showMessage("Stopped", 2000);
+}
+
+void MainWindow::updatePosition(qint64 position)
+{
+    if (!seeking && seekSlider)
+        seekSlider->setValue(static_cast<int>(position));
+
+    if (positionLabel)
+        positionLabel->setText(formatTime(position));
+}
+
+void MainWindow::updateDuration(qint64 duration)
+{
+    if (seekSlider) {
+        seekSlider->setRange(0, static_cast<int>(duration));
+        seekSlider->setEnabled(duration > 0);
+    }
+
+    if (durationLabel)
+        durationLabel->setText(formatTime(duration));
+}
+
+QString MainWindow::formatTime(qint64 milliseconds) const
+{
+    const qint64 totalSeconds = milliseconds / 1000;
+    const qint64 minutes = totalSeconds / 60;
+    const qint64 seconds = totalSeconds % 60;
+    return QString("%1:%2")
+        .arg(minutes, 2, 10, QLatin1Char('0'))
+        .arg(seconds, 2, 10, QLatin1Char('0'));
 }
