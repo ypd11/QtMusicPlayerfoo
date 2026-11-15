@@ -1,0 +1,3 @@
+# Hashes of file build rules.
+1e1030b89db40bdce2a4007153bf5c6b CMakeFiles/QtMusicPlayerfoo_autogen
+d20639da07ed24736095e19b40d8319e QtMusicPlayerfoo_autogen/timestamp
